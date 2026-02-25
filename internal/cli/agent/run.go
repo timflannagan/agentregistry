@@ -71,7 +71,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 }
 
 // Note: The below implementation may be redundant in most cases.
-// It allows for registry-type MCP server resolution at run-time, but in doing so, it regenerates folders for servers which were already accounted for (i.e. command-type get generated during their `add-cmd` command)
+// It allows for registry-type MCP server resolution at run-time, but in doing so, it
+// regenerates folders for servers which were already accounted for (i.e. command-type get
+// generated during their `add-cmd` command).
 // This is not a major issue or breaking, but something we could improve in the future.
 func runFromDirectory(ctx context.Context, projectDir string) error {
 	manifest, err := project.LoadManifest(projectDir)
@@ -79,78 +81,35 @@ func runFromDirectory(ctx context.Context, projectDir string) error {
 		return fmt.Errorf("failed to load agent.yaml: %w", err)
 	}
 
+	resolvedSkills, err := resolveSkillsForRuntime(manifest)
+	if err != nil {
+		return fmt.Errorf("failed to resolve skills from agent manifest: %w", err)
+	}
+	if err := materializeSkillsForRuntime(
+		ctx,
+		resolvedSkills,
+		skillsDirForAgentConfig(projectDir, manifest.Name, ""),
+		verbose,
+	); err != nil {
+		return fmt.Errorf("failed to materialize skills: %w", err)
+	}
+
 	// Always clear previously resolved registry artifacts to avoid stale folders.
 	if err := project.CleanupRegistryDir(projectDir, verbose); err != nil {
 		return fmt.Errorf("failed to clean registry directory: %w", err)
 	}
 
-	var serversForConfig []common.PythonMCPServer
-
-	// Resolve registry-type MCP servers if present
-	if hasRegistryServers(manifest) { //nolint:nestif
-		if verbose {
-			fmt.Println("[registry-resolve] Detected registry-type MCP servers in manifest")
-			fmt.Printf("[registry-resolve] Total MCP servers in manifest: %d\n", len(manifest.McpServers))
-			for i, srv := range manifest.McpServers {
-				fmt.Printf("[registry-resolve]   [%d] name=%q type=%q registryServerName=%q registryURL=%q\n",
-					i, srv.Name, srv.Type, srv.RegistryServerName, srv.RegistryURL)
-			}
+	registryResolvedServers, serversForConfig, err := resolveMCPServersForRuntime(manifest)
+	if err != nil {
+		return fmt.Errorf("failed to resolve MCP servers from agent manifest: %w", err)
+	}
+	if len(registryResolvedServers) > 0 {
+		tmpManifest := *manifest
+		tmpManifest.McpServers = registryResolvedServers
+		// create directories and build images for the registry-resolved servers
+		if err := project.EnsureMcpServerDirectories(projectDir, &tmpManifest, verbose); err != nil {
+			return fmt.Errorf("failed to create MCP server directories: %w", err)
 		}
-
-		if verbose {
-			fmt.Println("[registry-resolve] Starting resolution of registry servers...")
-		}
-		servers, err := agentutils.ParseAgentManifestServers(manifest, verbose)
-		if err != nil {
-			return fmt.Errorf("failed to parse agent manifest mcp servers: %w", err)
-		}
-		manifest.McpServers = servers
-
-		if verbose {
-			fmt.Printf("[registry-resolve] Resolution complete. Total servers after resolution: %d\n", len(manifest.McpServers))
-			for i, srv := range manifest.McpServers {
-				fmt.Printf("[registry-resolve]   [%d] name=%q type=%q build=%q image=%q command=%q\n",
-					i, srv.Name, srv.Type, srv.Build, srv.Image, srv.Command)
-			}
-		}
-
-		var registryResolvedServers []models.McpServerType
-		for _, srv := range manifest.McpServers {
-			if srv.Type == "command" && strings.HasPrefix(srv.Build, "registry/") {
-				registryResolvedServers = append(registryResolvedServers, srv)
-				if verbose {
-					fmt.Printf("[registry-resolve] Including server %q for build (type=command, build=%q)\n", srv.Name, srv.Build)
-				}
-			} else if verbose {
-				if srv.Type == "command" && srv.Build == "" && srv.Image != "" {
-					fmt.Printf("[registry-resolve] Skipping server %q for build (OCI image %q ready to use)\n", srv.Name, srv.Image)
-				} else {
-					fmt.Printf("[registry-resolve] Skipping server %q for build (type=%q, build=%q)\n", srv.Name, srv.Type, srv.Build)
-				}
-			}
-		}
-
-		if len(registryResolvedServers) > 0 {
-			if verbose {
-				fmt.Printf("[registry-resolve] %d registry-resolved servers require directory setup\n", len(registryResolvedServers))
-			}
-			tmpManifest := *manifest
-			tmpManifest.McpServers = registryResolvedServers
-			// create directories and build images for the registry-resolved servers
-			if err := project.EnsureMcpServerDirectories(projectDir, &tmpManifest, verbose); err != nil {
-				return fmt.Errorf("failed to create MCP server directories: %w", err)
-			}
-		} else if verbose {
-			fmt.Println("[registry-resolve] No registry-resolved command servers to build")
-		}
-
-		// Create MCP config for ALL resolved command-type servers (including OCI which don't need building)
-		serversForConfig = common.PythonServersFromManifest(manifest)
-		if verbose {
-			fmt.Printf("[registry-resolve] Created %d server configurations for MCP config (includes OCI servers)\n", len(serversForConfig))
-		}
-	} else if verbose {
-		fmt.Println("[registry-resolve] No registry-type MCP servers found in manifest")
 	}
 
 	// Always clean before run; only write config when we have resolved registry servers to persist.
@@ -188,6 +147,86 @@ func hasRegistryServers(manifest *models.AgentManifest) bool {
 	return false
 }
 
+func resolveMCPServersForRuntime(manifest *models.AgentManifest) ([]models.McpServerType, []common.PythonMCPServer, error) {
+	if manifest == nil {
+		return nil, nil, fmt.Errorf("agent manifest is required")
+	}
+	if !hasRegistryServers(manifest) {
+		if verbose {
+			fmt.Println("[registry-resolve] No registry-type MCP servers found in manifest")
+		}
+		return nil, nil, nil
+	}
+
+	if verbose {
+		fmt.Println("[registry-resolve] Detected registry-type MCP servers in manifest")
+		fmt.Printf("[registry-resolve] Total MCP servers in manifest: %d\n", len(manifest.McpServers))
+		for i, srv := range manifest.McpServers {
+			fmt.Printf("[registry-resolve]   [%d] name=%q type=%q registryServerName=%q registryURL=%q\n",
+				i, srv.Name, srv.Type, srv.RegistryServerName, srv.RegistryURL)
+		}
+		fmt.Println("[registry-resolve] Starting resolution of registry servers...")
+	}
+
+	servers, err := agentutils.ParseAgentManifestServers(manifest, verbose)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse agent manifest mcp servers: %w", err)
+	}
+	manifest.McpServers = servers
+
+	if verbose {
+		fmt.Printf("[registry-resolve] Resolution complete. Total servers after resolution: %d\n", len(manifest.McpServers))
+		for i, srv := range manifest.McpServers {
+			fmt.Printf("[registry-resolve]   [%d] name=%q type=%q build=%q image=%q command=%q\n",
+				i, srv.Name, srv.Type, srv.Build, srv.Image, srv.Command)
+		}
+	}
+
+	var registryResolvedServers []models.McpServerType
+	for _, srv := range manifest.McpServers {
+		if srv.Type == "command" && strings.HasPrefix(srv.Build, "registry/") {
+			registryResolvedServers = append(registryResolvedServers, srv)
+			if verbose {
+				fmt.Printf("[registry-resolve] Including server %q for build (type=command, build=%q)\n", srv.Name, srv.Build)
+			}
+			continue
+		}
+		if verbose {
+			if srv.Type == "command" && srv.Build == "" && srv.Image != "" {
+				fmt.Printf("[registry-resolve] Skipping server %q for build (OCI image %q ready to use)\n", srv.Name, srv.Image)
+			} else {
+				fmt.Printf("[registry-resolve] Skipping server %q for build (type=%q, build=%q)\n", srv.Name, srv.Type, srv.Build)
+			}
+		}
+	}
+	if len(registryResolvedServers) > 0 {
+		if verbose {
+			fmt.Printf("[registry-resolve] %d registry-resolved servers require directory setup\n", len(registryResolvedServers))
+		}
+	} else if verbose {
+		fmt.Println("[registry-resolve] No registry-resolved command servers to build")
+	}
+
+	serversForConfig := common.PythonServersFromManifest(manifest)
+	if verbose {
+		fmt.Printf("[registry-resolve] Created %d server configurations for MCP config (includes OCI servers)\n", len(serversForConfig))
+	}
+
+	return registryResolvedServers, serversForConfig, nil
+}
+
+func skillsDirForAgentConfig(baseDir, agentName, version string) string {
+	configDir, _ := common.ComputeMCPConfigPath(&common.MCPConfigTarget{
+		BaseDir:   baseDir,
+		AgentName: agentName,
+		Version:   version,
+	})
+	if configDir == "" {
+		return ""
+	}
+	return filepath.Join(configDir, "skills")
+}
+
 // runFromManifest runs an agent based on a manifest, with optional pre-resolved data.
 //   - overrides is non-nil when coming from runFromDirectory: compose and resolved MCP config
 //     are already prepared (including cleanup), so this function skips resolution/cleanup.
@@ -200,6 +239,7 @@ func runFromManifest(ctx context.Context, manifest *models.AgentManifest, versio
 
 	var composeData []byte
 	workDir := ""
+	cleanupWorkDir := false
 
 	useOverrides := overrides != nil
 	var serversForConfig []common.PythonMCPServer
@@ -266,6 +306,7 @@ func runFromManifest(ctx context.Context, manifest *models.AgentManifest, versio
 				fmt.Printf("[registry-resolve] Created temporary directory: %s\n", tmpDir)
 			}
 			workDir = tmpDir
+			cleanupWorkDir = true
 
 			// Build only servers that need building (npm/pypi, not OCI)
 			if len(serversToBuild) > 0 {
@@ -302,6 +343,30 @@ func runFromManifest(ctx context.Context, manifest *models.AgentManifest, versio
 			fmt.Println("[registry-resolve] No registry-type MCP servers found in manifest")
 		}
 
+		resolvedSkills, err := resolveSkillsForRuntime(manifest)
+		if err != nil {
+			return fmt.Errorf("failed to resolve skills from agent manifest: %w", err)
+		}
+		if len(resolvedSkills) > 0 && workDir == "" {
+			tmpDir, err := os.MkdirTemp("", "arctl-skill-resolve-*")
+			if err != nil {
+				return fmt.Errorf("failed to create temporary directory for skills: %w", err)
+			}
+			workDir = tmpDir
+			cleanupWorkDir = true
+			if verbose {
+				fmt.Printf("[skill-resolve] Created temporary directory: %s\n", tmpDir)
+			}
+		}
+		if err := materializeSkillsForRuntime(
+			ctx,
+			resolvedSkills,
+			skillsDirForAgentConfig(workDir, manifest.Name, version),
+			verbose,
+		); err != nil {
+			return fmt.Errorf("failed to materialize skills: %w", err)
+		}
+
 		data, err := renderComposeFromManifest(manifest, version)
 		if err != nil {
 			return err
@@ -320,8 +385,8 @@ func runFromManifest(ctx context.Context, manifest *models.AgentManifest, versio
 
 	err := runAgent(ctx, composeData, manifest, workDir, buildFlag)
 
-	// Clean up temp directory for registry-run agents
-	if !useOverrides && workDir != "" && strings.Contains(workDir, "arctl-registry-resolve-") {
+	// Clean up temp directory for registry/skill-resolved runs
+	if !useOverrides && cleanupWorkDir && workDir != "" {
 		if cleanupErr := os.RemoveAll(workDir); cleanupErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to remove temporary directory %s: %v\n", workDir, cleanupErr)
 		}
@@ -348,21 +413,25 @@ func renderComposeFromManifest(manifest *models.AgentManifest, version string) (
 	sanitizedVersion := utils.SanitizeVersion(version)
 
 	rendered, err := gen.RenderTemplate(string(templateBytes), struct {
-		Name          string
-		Version       string
-		Image         string
-		ModelProvider string
-		ModelName     string
-		EnvVars       []string
-		McpServers    []models.McpServerType
+		Name              string
+		Version           string
+		Image             string
+		ModelProvider     string
+		ModelName         string
+		TelemetryEndpoint string
+		HasSkills         bool
+		EnvVars           []string
+		McpServers        []models.McpServerType
 	}{
-		Name:          manifest.Name,
-		Version:       sanitizedVersion,
-		Image:         image,
-		ModelProvider: manifest.ModelProvider,
-		ModelName:     manifest.ModelName,
-		EnvVars:       project.EnvVarsFromManifest(manifest),
-		McpServers:    manifest.McpServers,
+		Name:              manifest.Name,
+		Version:           sanitizedVersion,
+		Image:             image,
+		ModelProvider:     manifest.ModelProvider,
+		ModelName:         manifest.ModelName,
+		TelemetryEndpoint: manifest.TelemetryEndpoint,
+		HasSkills:         len(manifest.Skills) > 0,
+		EnvVars:           project.EnvVarsFromManifest(manifest),
+		McpServers:        manifest.McpServers,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to render docker-compose template: %w", err)
