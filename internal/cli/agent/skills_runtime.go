@@ -1,16 +1,14 @@
 package agent
 
 import (
-	"context"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/agentregistry-dev/agentregistry/internal/cli/common/docker"
 	arclient "github.com/agentregistry-dev/agentregistry/internal/client"
 	"github.com/agentregistry-dev/agentregistry/pkg/models"
 )
@@ -96,6 +94,7 @@ func fetchSkillFromRegistry(registryURL, skillName, version string) (*models.Ski
 		return nil, err
 	}
 
+	// TODO: DI the client.
 	client := arclient.NewClient(baseURL, "")
 	if strings.EqualFold(version, "latest") {
 		resp, err := client.GetSkillByName(skillName)
@@ -129,6 +128,8 @@ func extractSkillImageRef(skillResp *models.SkillResponse) (string, error) {
 	if skillResp == nil {
 		return "", fmt.Errorf("skill response is required")
 	}
+	// TODO: add support for git-based skill fetching. Requires
+	// https://github.com/kagent-dev/kagent/pull/1365.
 	for _, pkg := range skillResp.Skill.Packages {
 		typ := strings.ToLower(strings.TrimSpace(pkg.RegistryType))
 		if (typ == "docker" || typ == "oci") && strings.TrimSpace(pkg.Identifier) != "" {
@@ -138,7 +139,7 @@ func extractSkillImageRef(skillResp *models.SkillResponse) (string, error) {
 	return "", fmt.Errorf("no docker/oci package found")
 }
 
-func materializeSkillsForRuntime(ctx context.Context, skills []resolvedSkillRef, skillsDir string, verbose bool) error {
+func materializeSkillsForRuntime(skills []resolvedSkillRef, skillsDir string, verbose bool) error {
 	if strings.TrimSpace(skillsDir) == "" {
 		if len(skills) == 0 {
 			return nil
@@ -165,7 +166,7 @@ func materializeSkillsForRuntime(ctx context.Context, skills []resolvedSkillRef,
 		usedDirs[dirName]++
 
 		targetDir := filepath.Join(skillsDir, dirName)
-		if err := extractSkillImage(ctx, skill.image, targetDir, verbose); err != nil {
+		if err := extractSkillImage(skill.image, targetDir, verbose); err != nil {
 			return fmt.Errorf("materialize skill %q from %q: %w", skill.name, skill.image, err)
 		}
 	}
@@ -193,27 +194,24 @@ func sanitizeSkillDirName(name string) string {
 	return out
 }
 
-func extractSkillImage(ctx context.Context, imageRef, targetDir string, verbose bool) error {
+func extractSkillImage(imageRef, targetDir string, verbose bool) error {
 	if strings.TrimSpace(imageRef) == "" {
 		return fmt.Errorf("image reference is required")
 	}
 
-	existsLocally, err := dockerImageExistsLocally(ctx, imageRef)
-	if err != nil {
-		return fmt.Errorf("check local image availability: %w", err)
-	}
-	if !existsLocally {
-		if err := runDockerCommand(ctx, verbose, "pull", imageRef); err != nil {
+	exec := docker.NewExecutor(verbose, "")
+	if !exec.ImageExistsLocally(imageRef) {
+		if err := exec.Pull(imageRef); err != nil {
 			return fmt.Errorf("pull image: %w", err)
 		}
 	}
 
-	containerID, err := createSkillContainer(ctx, imageRef)
+	containerID, err := exec.CreateContainer(imageRef)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		_ = runDockerCommand(ctx, false, "rm", containerID)
+		_ = exec.RemoveContainer(containerID)
 	}()
 
 	tempDir, err := os.MkdirTemp("", "arctl-skill-extract-*")
@@ -222,180 +220,14 @@ func extractSkillImage(ctx context.Context, imageRef, targetDir string, verbose 
 	}
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
-	cpCmd := exec.CommandContext(ctx, "docker", "cp", containerID+":"+"/.", tempDir)
-	if verbose {
-		cpCmd.Stdout = os.Stdout
-		cpCmd.Stderr = os.Stderr
-		if err := cpCmd.Run(); err != nil {
-			return fmt.Errorf("docker cp failed: %w", err)
-		}
-	} else {
-		output, err := cpCmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("docker cp failed: %w: %s", err, strings.TrimSpace(string(output)))
-		}
+	if err := exec.CopyFromContainer(containerID, "/.", tempDir); err != nil {
+		return err
 	}
-
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return fmt.Errorf("create target skill directory: %w", err)
 	}
-
-	if err := copyNonEmptyContents(tempDir, targetDir); err != nil {
+	if err := docker.CopyNonEmptyContents(tempDir, targetDir); err != nil {
 		return fmt.Errorf("copy extracted skill contents: %w", err)
 	}
 	return nil
-}
-
-func createSkillContainer(ctx context.Context, imageRef string) (string, error) {
-	createCmd := exec.CommandContext(ctx, "docker", "create", "--entrypoint", "/bin/sh", imageRef, "-c", "echo")
-	output, err := createCmd.CombinedOutput()
-	if err != nil {
-		// Retry without entrypoint override for minimal images.
-		fallback := exec.CommandContext(ctx, "docker", "create", imageRef)
-		output, err = fallback.CombinedOutput()
-		if err != nil {
-			return "", fmt.Errorf("create container from image: %w: %s", err, strings.TrimSpace(string(output)))
-		}
-	}
-
-	containerID := strings.TrimSpace(string(output))
-	if containerID == "" {
-		return "", fmt.Errorf("docker create returned empty container id")
-	}
-	return containerID, nil
-}
-
-func runDockerCommand(ctx context.Context, verbose bool, args ...string) error {
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	if verbose {
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		return cmd.Run()
-	}
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("docker %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
-
-func dockerImageExistsLocally(ctx context.Context, imageRef string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "docker", "image", "inspect", imageRef)
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() != 0 {
-			return false, nil
-		}
-		return false, fmt.Errorf("docker image inspect failed: %w", err)
-	}
-	return true, nil
-}
-
-func copyNonEmptyContents(src, dst string) error {
-	// Skip system directories created by Docker extraction from non-scratch images.
-	skipDirs := map[string]struct{}{
-		"dev":  {},
-		"etc":  {},
-		"proc": {},
-		"sys":  {},
-	}
-
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return fmt.Errorf("read source directory: %w", err)
-	}
-
-	for _, entry := range entries {
-		name := entry.Name()
-		if name == ".dockerenv" {
-			continue
-		}
-		if _, skip := skipDirs[name]; skip {
-			continue
-		}
-
-		srcPath := filepath.Join(src, name)
-		dstPath := filepath.Join(dst, name)
-
-		if entry.IsDir() {
-			if !hasNonEmptyContent(srcPath, skipDirs) {
-				continue
-			}
-			if err := os.MkdirAll(dstPath, 0o755); err != nil {
-				return fmt.Errorf("create destination directory %s: %w", dstPath, err)
-			}
-			if err := copyNonEmptyContents(srcPath, dstPath); err != nil {
-				return err
-			}
-			continue
-		}
-
-		info, err := entry.Info()
-		if err != nil {
-			return fmt.Errorf("stat source file %s: %w", srcPath, err)
-		}
-		if info.Size() == 0 {
-			continue
-		}
-		if err := copyFile(srcPath, dstPath); err != nil {
-			return fmt.Errorf("copy file %s: %w", srcPath, err)
-		}
-	}
-	return nil
-}
-
-func hasNonEmptyContent(dir string, skipDirs map[string]struct{}) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-
-	for _, entry := range entries {
-		name := entry.Name()
-		if name == ".dockerenv" {
-			continue
-		}
-		if entry.IsDir() {
-			if _, skip := skipDirs[name]; skip {
-				continue
-			}
-			if hasNonEmptyContent(filepath.Join(dir, name), skipDirs) {
-				return true
-			}
-			continue
-		}
-		info, err := entry.Info()
-		if err == nil && info.Size() > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func copyFile(src, dst string) error {
-	sourceFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = sourceFile.Close() }()
-
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-
-	destFile, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = destFile.Close() }()
-
-	if _, err := io.Copy(destFile, sourceFile); err != nil {
-		return err
-	}
-
-	sourceInfo, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	return os.Chmod(dst, sourceInfo.Mode())
 }

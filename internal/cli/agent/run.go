@@ -70,11 +70,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	return runFromManifest(cmd.Context(), &manifest, version, nil)
 }
 
-// Note: The below implementation may be redundant in most cases.
-// It allows for registry-type MCP server resolution at run-time, but in doing so, it
-// regenerates folders for servers which were already accounted for (i.e. command-type get
-// generated during their `add-cmd` command).
-// This is not a major issue or breaking, but something we could improve in the future.
+// runFromDirectory runs an agent from a local project directory. It resolves
+// registry-type MCP servers at runtime, regenerating folders for servers that
+// may have already been created during their initial add-cmd invocation. This
+// redundancy is acceptable but could be optimized in the future.
 func runFromDirectory(ctx context.Context, projectDir string) error {
 	manifest, err := project.LoadManifest(projectDir)
 	if err != nil {
@@ -86,7 +85,6 @@ func runFromDirectory(ctx context.Context, projectDir string) error {
 		return fmt.Errorf("failed to resolve skills from agent manifest: %w", err)
 	}
 	if err := materializeSkillsForRuntime(
-		ctx,
 		resolvedSkills,
 		skillsDirForAgentConfig(projectDir, manifest.Name, ""),
 		verbose,
@@ -135,84 +133,6 @@ func runFromDirectory(ctx context.Context, projectDir string) error {
 		composeData: data,
 		workDir:     projectDir,
 	})
-}
-
-// hasRegistryServers checks if the manifest has any registry-type MCP servers.
-func hasRegistryServers(manifest *models.AgentManifest) bool {
-	for _, srv := range manifest.McpServers {
-		if srv.Type == "registry" {
-			return true
-		}
-	}
-	return false
-}
-
-func resolveMCPServersForRuntime(manifest *models.AgentManifest) ([]models.McpServerType, []common.PythonMCPServer, error) {
-	if manifest == nil {
-		return nil, nil, fmt.Errorf("agent manifest is required")
-	}
-	if !hasRegistryServers(manifest) {
-		if verbose {
-			fmt.Println("[registry-resolve] No registry-type MCP servers found in manifest")
-		}
-		return nil, nil, nil
-	}
-
-	if verbose {
-		fmt.Println("[registry-resolve] Detected registry-type MCP servers in manifest")
-		fmt.Printf("[registry-resolve] Total MCP servers in manifest: %d\n", len(manifest.McpServers))
-		for i, srv := range manifest.McpServers {
-			fmt.Printf("[registry-resolve]   [%d] name=%q type=%q registryServerName=%q registryURL=%q\n",
-				i, srv.Name, srv.Type, srv.RegistryServerName, srv.RegistryURL)
-		}
-		fmt.Println("[registry-resolve] Starting resolution of registry servers...")
-	}
-
-	servers, err := agentutils.ParseAgentManifestServers(manifest, verbose)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse agent manifest mcp servers: %w", err)
-	}
-	manifest.McpServers = servers
-
-	if verbose {
-		fmt.Printf("[registry-resolve] Resolution complete. Total servers after resolution: %d\n", len(manifest.McpServers))
-		for i, srv := range manifest.McpServers {
-			fmt.Printf("[registry-resolve]   [%d] name=%q type=%q build=%q image=%q command=%q\n",
-				i, srv.Name, srv.Type, srv.Build, srv.Image, srv.Command)
-		}
-	}
-
-	var registryResolvedServers []models.McpServerType
-	for _, srv := range manifest.McpServers {
-		if srv.Type == "command" && strings.HasPrefix(srv.Build, "registry/") {
-			registryResolvedServers = append(registryResolvedServers, srv)
-			if verbose {
-				fmt.Printf("[registry-resolve] Including server %q for build (type=command, build=%q)\n", srv.Name, srv.Build)
-			}
-			continue
-		}
-		if verbose {
-			if srv.Type == "command" && srv.Build == "" && srv.Image != "" {
-				fmt.Printf("[registry-resolve] Skipping server %q for build (OCI image %q ready to use)\n", srv.Name, srv.Image)
-			} else {
-				fmt.Printf("[registry-resolve] Skipping server %q for build (type=%q, build=%q)\n", srv.Name, srv.Type, srv.Build)
-			}
-		}
-	}
-	if len(registryResolvedServers) > 0 {
-		if verbose {
-			fmt.Printf("[registry-resolve] %d registry-resolved servers require directory setup\n", len(registryResolvedServers))
-		}
-	} else if verbose {
-		fmt.Println("[registry-resolve] No registry-resolved command servers to build")
-	}
-
-	serversForConfig := common.PythonServersFromManifest(manifest)
-	if verbose {
-		fmt.Printf("[registry-resolve] Created %d server configurations for MCP config (includes OCI servers)\n", len(serversForConfig))
-	}
-
-	return registryResolvedServers, serversForConfig, nil
 }
 
 func skillsDirForAgentConfig(baseDir, agentName, version string) string {
@@ -359,7 +279,6 @@ func runFromManifest(ctx context.Context, manifest *models.AgentManifest, versio
 			}
 		}
 		if err := materializeSkillsForRuntime(
-			ctx,
 			resolvedSkills,
 			skillsDirForAgentConfig(workDir, manifest.Name, version),
 			verbose,
