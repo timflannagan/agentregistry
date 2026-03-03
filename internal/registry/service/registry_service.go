@@ -314,6 +314,13 @@ func (s *registryServiceImpl) CreateSkill(ctx context.Context, req *models.Skill
 	})
 }
 
+// DeleteSkill permanently removes a skill version from the registry.
+func (s *registryServiceImpl) DeleteSkill(ctx context.Context, skillName, version string) error {
+	return s.db.InTransaction(ctx, func(txCtx context.Context, tx pgx.Tx) error {
+		return s.db.DeleteSkill(txCtx, tx, skillName, version)
+	})
+}
+
 func (s *registryServiceImpl) createSkillInTransaction(ctx context.Context, tx pgx.Tx, req *models.SkillJSON) (*models.SkillResponse, error) {
 	// Basic validation: ensure required fields present
 	if req == nil || req.Name == "" || req.Version == "" {
