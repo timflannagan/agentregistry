@@ -483,23 +483,16 @@ func TestSkillDelete(t *testing.T) {
 
 	skillName := UniqueNameWithPrefix("e2e-del-skill")
 	version := "0.0.1-e2e"
-	githubRepo := "https://github.com/agentregistry-dev/skills/tree/main/artifacts-builder"
+	gitRepo := "https://github.com/agentregistry-dev/skills/tree/main/artifacts-builder"
 
-	// Create a skill folder with SKILL.md
 	skillDir := filepath.Join(tmpDir, skillName)
-	if err := os.MkdirAll(skillDir, 0755); err != nil {
-		t.Fatalf("failed to create skill dir: %v", err)
-	}
-	skillMd := "---\nname: " + skillName + "\ndescription: E2E delete test\n---\n# Test\n"
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMd), 0644); err != nil {
-		t.Fatalf("failed to write SKILL.md: %v", err)
-	}
+	createSkillDir(t, skillDir, skillName, "E2E delete test")
 
 	// Step 1: Publish the skill
 	t.Run("publish", func(t *testing.T) {
 		result := RunArctl(t, tmpDir,
 			"skill", "publish", skillDir,
-			"--github", githubRepo,
+			"--git", gitRepo,
 			"--version", version,
 			"--registry-url", regURL,
 		)
@@ -554,23 +547,25 @@ func TestSkillDeletePromotesLatest(t *testing.T) {
 	skillName := UniqueNameWithPrefix("e2e-promote-skill")
 	v1 := "0.0.1"
 	v2 := "0.0.2"
-	githubRepo := "https://github.com/agentregistry-dev/skills/tree/main/artifacts-builder"
+	gitRepo := "https://github.com/agentregistry-dev/skills/tree/main/artifacts-builder"
 
-	// Create a skill folder with SKILL.md
 	skillDir := filepath.Join(tmpDir, skillName)
-	if err := os.MkdirAll(skillDir, 0755); err != nil {
-		t.Fatalf("failed to create skill dir: %v", err)
-	}
-	skillMd := "---\nname: " + skillName + "\ndescription: E2E promote test\n---\n# Test\n"
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMd), 0644); err != nil {
-		t.Fatalf("failed to write SKILL.md: %v", err)
-	}
+	createSkillDir(t, skillDir, skillName, "E2E promote test")
+
+	// Cleanup: delete remaining versions after the test
+	t.Cleanup(func() {
+		RunArctl(t, tmpDir,
+			"skill", "delete", skillName,
+			"--version", v1,
+			"--registry-url", regURL,
+		)
+	})
 
 	// Step 1: Publish v1
 	t.Run("publish_v1", func(t *testing.T) {
 		result := RunArctl(t, tmpDir,
 			"skill", "publish", skillDir,
-			"--github", githubRepo,
+			"--git", gitRepo,
 			"--version", v1,
 			"--registry-url", regURL,
 		)
@@ -581,7 +576,7 @@ func TestSkillDeletePromotesLatest(t *testing.T) {
 	t.Run("publish_v2", func(t *testing.T) {
 		result := RunArctl(t, tmpDir,
 			"skill", "publish", skillDir,
-			"--github", githubRepo,
+			"--git", gitRepo,
 			"--version", v2,
 			"--registry-url", regURL,
 		)
