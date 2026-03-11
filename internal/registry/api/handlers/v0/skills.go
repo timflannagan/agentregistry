@@ -125,8 +125,14 @@ func RegisterSkillsEndpoints(api huma.API, pathPrefix string, registry service.R
 			return nil, huma.Error400BadRequest("Invalid version encoding", err)
 		}
 		if err := registry.DeleteSkill(ctx, skillName, version); err != nil {
-			if errors.Is(err, database.ErrNotFound) || errors.Is(err, auth.ErrForbidden) || errors.Is(err, auth.ErrUnauthenticated) {
+			if errors.Is(err, database.ErrNotFound) {
 				return nil, huma.Error404NotFound("Skill not found")
+			}
+			if errors.Is(err, auth.ErrUnauthenticated) {
+				return nil, huma.Error401Unauthorized("Authentication required")
+			}
+			if errors.Is(err, auth.ErrForbidden) {
+				return nil, huma.Error403Forbidden("Forbidden")
 			}
 			return nil, huma.Error500InternalServerError("Failed to delete skill", err)
 		}

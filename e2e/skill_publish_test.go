@@ -545,6 +545,76 @@ func TestSkillDelete(t *testing.T) {
 	})
 }
 
+// TestSkillDeletePromotesLatest verifies that deleting the current latest
+// version of a skill promotes the previous version to latest.
+func TestSkillDeletePromotesLatest(t *testing.T) {
+	regURL := RegistryURL(t)
+	tmpDir := t.TempDir()
+
+	skillName := UniqueNameWithPrefix("e2e-promote-skill")
+	v1 := "0.0.1"
+	v2 := "0.0.2"
+	githubRepo := "https://github.com/agentregistry-dev/skills/tree/main/artifacts-builder"
+
+	// Create a skill folder with SKILL.md
+	skillDir := filepath.Join(tmpDir, skillName)
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatalf("failed to create skill dir: %v", err)
+	}
+	skillMd := "---\nname: " + skillName + "\ndescription: E2E promote test\n---\n# Test\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMd), 0644); err != nil {
+		t.Fatalf("failed to write SKILL.md: %v", err)
+	}
+
+	// Step 1: Publish v1
+	t.Run("publish_v1", func(t *testing.T) {
+		result := RunArctl(t, tmpDir,
+			"skill", "publish", skillDir,
+			"--github", githubRepo,
+			"--version", v1,
+			"--registry-url", regURL,
+		)
+		RequireSuccess(t, result)
+	})
+
+	// Step 2: Publish v2 (becomes latest)
+	t.Run("publish_v2", func(t *testing.T) {
+		result := RunArctl(t, tmpDir,
+			"skill", "publish", skillDir,
+			"--github", githubRepo,
+			"--version", v2,
+			"--registry-url", regURL,
+		)
+		RequireSuccess(t, result)
+	})
+
+	// Step 3: Verify "latest" resolves to v2
+	t.Run("latest_is_v2", func(t *testing.T) {
+		skill := fetchSkillFromAPI(t, regURL, skillName, "latest")
+		if skill.Version != v2 {
+			t.Fatalf("expected latest to be %s, got %s", v2, skill.Version)
+		}
+	})
+
+	// Step 4: Delete v2 (the current latest)
+	t.Run("delete_v2", func(t *testing.T) {
+		result := RunArctl(t, tmpDir,
+			"skill", "delete", skillName,
+			"--version", v2,
+			"--registry-url", regURL,
+		)
+		RequireSuccess(t, result)
+	})
+
+	// Step 5: Verify "latest" now resolves to v1
+	t.Run("latest_promoted_to_v1", func(t *testing.T) {
+		skill := fetchSkillFromAPI(t, regURL, skillName, "latest")
+		if skill.Version != v1 {
+			t.Fatalf("expected latest to be promoted to %s after deleting %s, got %s", v1, v2, skill.Version)
+		}
+	})
+}
+
 // TestSkillDeleteNotFound verifies that deleting a skill that was never
 // published returns 404 via the HTTP API.
 func TestSkillDeleteNotFound(t *testing.T) {
