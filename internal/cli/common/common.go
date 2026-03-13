@@ -81,10 +81,12 @@ func ResolveVersion(flagVersion, manifestVersion string) string {
 	return "latest"
 }
 
-// FormatVersionForDisplay normalizes version display with a leading "v".
+// FormatVersionForDisplay adds a leading "v" only for valid semver values.
+// Non-semver labels are returned unchanged.
 func FormatVersionForDisplay(version string) string {
-	if !semver.IsValid(versionpkg.EnsureVPrefix(version)) {
+	versionWithV := versionpkg.EnsureVPrefix(version)
+	if !semver.IsValid(versionWithV) {
 		return version
 	}
-	return versionpkg.EnsureVPrefix(version)
+	return versionWithV
 }
