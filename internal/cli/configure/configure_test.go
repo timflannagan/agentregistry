@@ -18,7 +18,12 @@ import (
 // and returns its combined output.
 func runConfigure(t *testing.T, args ...string) string {
 	t.Helper()
-	cmd := NewCommand(cliruntime.Deps{})
+	return runConfigureWithDeps(t, cliruntime.Deps{}, args...)
+}
+
+func runConfigureWithDeps(t *testing.T, deps cliruntime.Deps, args ...string) string {
+	t.Helper()
+	cmd := NewCommand(deps)
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
@@ -27,6 +32,108 @@ func runConfigure(t *testing.T, args ...string) string {
 		t.Fatalf("configure %v: %v", args, err)
 	}
 	return out.String()
+}
+
+func TestConfigureClaudeCodePluginMarketplace(t *testing.T) {
+	t.Chdir(t.TempDir())
+	seedFile(t, claudeSettingsLocalPath, `{
+		"permissions": {"allow": ["Bash(go test:*)"]},
+		"extraKnownMarketplaces": {
+			"other": {"source": {"source": "github", "repo": "example/plugins"}}
+		}
+	}`)
+
+	registryURL := "https://registry.example.com/"
+	rt := cliruntime.New(cliruntime.Config{RegistryURL: &registryURL})
+	output := runConfigureWithDeps(t, cliruntime.Deps{Runtime: rt}, "claude-code", "--plugin-marketplace")
+
+	assertFileJSON(t, claudeSettingsLocalPath, `{
+		"permissions": {"allow": ["Bash(go test:*)"]},
+		"extraKnownMarketplaces": {
+			"other": {"source": {"source": "github", "repo": "example/plugins"}},
+			"agentregistry": {
+				"source": {
+					"source": "url",
+					"url": "https://registry.example.com/plugin-marketplace/marketplace.json",
+					"headersHelper": "arctl configure claude-code marketplace-headers"
+				}
+			}
+		}
+	}`)
+	if !strings.Contains(output, "Configured AgentRegistry plugin marketplace") {
+		t.Fatalf("output missing marketplace confirmation: %s", output)
+	}
+}
+
+func TestConfigureClaudeCodePluginMarketplaceCustomURL(t *testing.T) {
+	t.Chdir(t.TempDir())
+	rt := cliruntime.New(cliruntime.Config{})
+	runConfigureWithDeps(t, cliruntime.Deps{Runtime: rt},
+		"claude-code", "--plugin-marketplace-url", "https://registry.example.com/plugins/marketplace.json")
+
+	assertFileJSON(t, claudeSettingsLocalPath, `{
+		"extraKnownMarketplaces": {
+			"agentregistry": {
+				"source": {
+					"source": "url",
+					"url": "https://registry.example.com/plugins/marketplace.json",
+					"headersHelper": "arctl configure claude-code marketplace-headers"
+				}
+			}
+		}
+	}`)
+}
+
+func TestConfigureMarketplaceHeaders(t *testing.T) {
+	token := "stored-token"
+	rt := cliruntime.New(cliruntime.Config{RegistryToken: &token})
+	cmd := NewCommand(cliruntime.Deps{Runtime: rt})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"claude-code", "marketplace-headers"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("marketplace-headers failed: %v", err)
+	}
+
+	var got map[string]string
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("parsing marketplace headers: %v", err)
+	}
+	if got["Authorization"] != "Bearer stored-token" {
+		t.Fatalf("Authorization = %q, want %q", got["Authorization"], "Bearer stored-token")
+	}
+}
+
+func TestConfigureMarketplaceHeadersWithoutToken(t *testing.T) {
+	rt := cliruntime.New(cliruntime.Config{})
+	cmd := NewCommand(cliruntime.Deps{Runtime: rt})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"claude-code", "marketplace-headers"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("marketplace-headers failed: %v", err)
+	}
+
+	var got map[string]string
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("parsing marketplace headers: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("headers = %#v, want empty headers", got)
+	}
+}
+
+func TestConfigurePluginMarketplaceRejectsOtherClients(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cmd := NewCommand(cliruntime.Deps{})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"cursor", "--plugin-marketplace"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected error for non-Claude Code client")
+	}
 }
 
 // seedFile writes content at path relative to the current working directory,

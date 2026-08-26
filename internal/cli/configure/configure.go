@@ -20,7 +20,7 @@ var clientConfigurers = map[string]ClientConfigurer{
 	"kiro":        &KiroConfigurer{},
 }
 
-func NewCommand(_ cliruntime.Deps) *cobra.Command {
+func NewCommand(deps cliruntime.Deps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   cliruntime.CommandConfigure,
 		Short: "Configure a client",
@@ -28,7 +28,11 @@ func NewCommand(_ cliruntime.Deps) *cobra.Command {
 	}
 
 	for name, configurer := range clientConfigurers {
-		cmd.AddCommand(newClientCommand(name, configurer))
+		clientCmd := newClientCommand(name, configurer)
+		if name == "claude-code" {
+			configureClaudeCodeMarketplace(clientCmd, deps.Runtime)
+		}
+		cmd.AddCommand(clientCmd)
 	}
 
 	return cmd

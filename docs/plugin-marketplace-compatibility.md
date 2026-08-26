@@ -25,6 +25,27 @@ Plugins that aren't `Ready` with a resolved source pin, or that resolved to an O
 
 ## Pointing a client at it
 
+Configure Claude Code's MCP connection and the AgentRegistry marketplace:
+
+```bash
+arctl --registry-url https://registry.example.com \
+  configure claude-code --plugin-marketplace
+```
+
+This preserves existing entries while writing the marketplace to
+`.claude/settings.local.json`. The generated `headersHelper` asks `arctl` for
+the current registry token on each fetch, so `arctl` must be on `PATH`. Dynamic
+headers require Claude Code 2.1.238 or newer.
+
+For a marketplace mounted under a custom path, provide its full URL:
+
+```bash
+arctl configure claude-code \
+  --plugin-marketplace-url https://registry.example.com/plugins/plugin-marketplace/marketplace.json
+```
+
+An unauthenticated OSS deployment can also be added directly:
+
 ```
 claude plugin marketplace add https://registry.example.com/plugin-marketplace/marketplace.json
 ```
